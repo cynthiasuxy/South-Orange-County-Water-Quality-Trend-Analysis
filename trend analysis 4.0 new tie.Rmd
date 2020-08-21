@@ -1,0 +1,829 @@
+---
+title: "South Orange County Water Quality Trend Analysis"
+author: "Xinyi Su"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        theme: united
+        df_print: paged
+        code_folding: show
+runtime: shiny
+---
+```{r include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Synopsis
+In the past twenty years, so much work has been done to maintain and improve water quality in California. To evaluate the progress and effect of the work, this analysis uses seasonal Mann-Kendall test with the bacterial characteristics data from 136 stations located in South Orange County to analyze the trend of water quality in the past two decades. 
+<br>
+<br>
+According to California Ocean Plan (established since 1972), bacterial characteristics, such as fecal coliform and enterococcus, are one of the important indicators of water quality. As for the seasonal Mann-Kendall test, it has a long history being widely accepted in the area of water quality analysis, as it does not assume any particular distributional form and it can handle the problem of limits of detection well (Hirsch et al.,1982).
+<br>
+<br>
+In the following sections, this analysis will provide an interactive feature that allows people to check the evaluation result of the trend analysis directly by selecting the station code and bacterial characteristics. Also, in the other tab, there is an example that shows theanalysis process in detail, using the data from the station Dana Point Harbor, Orange County (BDP08), and fecal coliform.  
+
+## Package Required
+To reproduce the code and results, you will need to load the following packages:
+```{r message = FALSE, warning = FALSE}
+library(readr)      ## loading datasets
+library(readxl)     ## loading datasets
+library(zoo)        ## creating time variables
+library(DT)         ## previewing the dataset
+library(dplyr)      ## data manipulating
+library(tidyr)      ## data manipulating
+library(ggplot2)    ## data visualization
+library(plotly)     ## data visualization
+library(shiny)      ## interactive app
+```
+
+## Data Preparation {.tabset}
+### Original Dataset
+* Data Source
+
+San Diego Water Quality Boards  
+
+
+* Description  
+
+This dataset contains 79 variables (some of which are empty), recording 243,468 observations of the bacterial characteristics of water quality at 136 stations of the Orange County area from Oct 1999 to May 2020.
+```{r results='hide', warning = FALSE, message = FALSE}
+## load the dataset
+dta1 <- read_csv("ceden_data_retrieval_202061719561 2.csv")
+
+## drop the empty columns
+emptycols <- colSums(is.na(dta1)) == nrow(dta1)
+dta2 <- dta1[!emptycols]
+```
+
+
+The table below shows the first 100 entries of the original dataset. To look more concise, the table doesn't include variables that don't have any records.
+
+```{r echo = FALSE}
+head(dta2,100) %>%
+    datatable(options = list(scrollX = TRUE, 
+                             columnDefs = list(list(className = 'dt-center'))))
+```
+
+
+
+### Data Cleaning and Subsetting
+* Rename variable names to the lower case.  
+```{r echo = TRUE}
+colnames(dta1)<-tolower(colnames(dta1))
+```
+
+* Drop missing values or invalid values (for example, negative result)and merge stations whose station codes end with "u", "d", or "z".
+```{r}
+dta1 <- dta1[!(is.na(dta1$result)),]
+dta1 <- dta1[dta1$result >= 0,]
+```
+
+* Prepare time variables.
+```{r}
+searchString <- " "
+replacementString <- ""
+dta1$sampledate <- as.Date(dta1$sampledate, format = "%m/%d/%y")
+dta1$sampleyear <- as.numeric(strftime(dta1$sampledate, format = "%Y"))
+dta1$sampleweek <- strftime(dta1$sampledate, format = "%W")
+dta1$sampleyrwk <- paste(dta1$sampleyear,dta1$sampleweek)
+dta1$sampleyrwk <- as.numeric(sub(searchString,replacementString,dta1$sampleyrwk))
+```
+  
+* Transform to logarithmic form to adjust the right-skewed tendency
+```{r results='hide'}
+dta1$result0 <- dta1$result
+dta1$result <- log(dta1$result0)
+```
+
+    
+## Monthly Mann-Kendall Test {.tabset}
+### Test Result by Station and Object
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+shinyApp(
+    ui <- fluidPage(
+        htmlOutput(outputId = 'stationselector'),
+        htmlOutput(outputId = 'analyteselector'),
+        actionButton(inputId = 'click', label = 'Get the result'),
+        br(),
+        br(),
+        # output
+        htmlOutput(outputId = 'Z'),
+        br(),
+        br(),
+        plotlyOutput(outputId = 'distribution')
+        ),
+    
+server <- function(input, output){
+    output$stationselector <- renderUI({
+        selectInput(inputId = 'stationcode1',
+                    label = strong('Station Code'),
+                    choices = unique(dta1$stationcode),
+                    selected = 'BDP08')
+    })
+    output$analyteselector <- renderUI({
+        data_available <- dta1[dta1$stationcode == input$stationcode1,]
+        selectInput(inputId = 'analyte1',
+                    label = strong('Bacterial Characteristic'),
+                    choices = unique(data_available$analyte),
+                    selected = 'Coliform, Fecal') 
+    })
+    dta_median <- eventReactive(input$click,{
+    dta_test <-dta1[dta1$stationcode == input$stationcode1 & dta1$analyte == input$analyte1,]
+    dta_test$wkresult <- 0
+    for (w in dta_test$sampleyrwk){
+        dta_test[dta_test$sampleyrwk == w,]$wkresult <- if (sum(dta_test$sampleyrwk == w)>1){
+            median(dta_test[dta_test$sampleyrwk == w,]$result)
+        }else{
+            dta_test[dta_test$sampleyrwk == w,]$result
+        }
+    }
+    dta_test
+    })
+    
+    dta_week <- reactive({
+        dta_weekly <- as.data.frame(list("wkresult"=0,"resultqualcode"=0,"sampledate"=0,
+                                      "sampleyrwk"=matrix(unique(dta_median()$sampleyrwk))))
+        for (w in dta_median()$sampleyrwk){
+            dta_weekly[dta_weekly$sampleyrwk==w,]$sampledate <- as.character(dta_median()[dta_median()$sampleyrwk==w,]$sampledate[1])
+            dta_weekly[dta_weekly$sampleyrwk==w,]$wkresult <- dta_median()[dta_median()$sampleyrwk==w,]$wkresult[1]
+            dta_weekly[dta_weekly$sampleyrwk==w,]$resultqualcode <- as.character(dta_median()[dta_median()$sampleyrwk==w,]$resultqualcode[1])
+        }
+        dta_weekly$sampledate <- as.Date(dta_weekly$sampledate)
+        dta_weekly$week <- as.numeric(strftime(dta_weekly$sampledate, format = "%V"))
+        dta_weekly$month <- as.numeric(strftime(dta_weekly$sampledate, format = "%m"))
+        #evaluation
+        dta_weekly<-arrange(dta_weekly)[order(dta_weekly$sampledate),]
+        dta_weekly$mks <- 0
+        temdta <- list()
+        for (j in as.numeric(row.names(dta_weekly))) {
+            temdta[[j]] <- list('wkresult' =dta_weekly[(dta_weekly$sampledate > dta_weekly$sampledate[j])&
+                                                        (dta_weekly$month == dta_weekly$month[j]),]$wkresult,
+                                'resultqualcode'=dta_weekly[(dta_weekly$sampledate > dta_weekly$sampledate[j])&
+                                                             (dta_weekly$month == dta_weekly$month[j]),]$resultqualcode)
+            xi <- dta_weekly$wkresult[j]
+            c <- length(temdta[[j]][[1]])
+            if (c != 0){
+                if (dta_weekly$resultqualcode[j] == "="){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]]== "<"){
+                            if(xi >= temdta[[j]][[1]][[k]]){
+                                a<--1} else {
+                                    a<-0}
+                        }else if(temdta[[j]][[2]][[k]]== "<="){
+                                if(xi > temdta[[j]][[1]][[k]]){
+                                    a<--1} else {
+                                        a<-0}
+                        }else if(temdta[[j]][[2]][[k]]== ">"){
+                            if(xi <= temdta[[j]][[1]][[k]]){
+                                a<-1} else {
+                                    a<-0}
+                        }else if(temdta[[j]][[2]][[k]]== ">="){
+                            if(xi < temdta[[j]][[1]][[k]]){
+                                a<-1} else {
+                                    a<-0}
+                        }else{
+                            if(xi > temdta[[j]][[1]][[k]]){
+                                a<--1} else if (xi == temdta[[j]][[1]][[k]]){
+                                    a<-0}else{
+                                        a <-1}
+                        }
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else if(dta_weekly$resultqualcode[j] == "<"){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]] %in% c("=", ">", ">=")){
+                            if(xi <= temdta[[j]][[1]][[k]]){a<-1} else {a<-0}
+                        }else {a <-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else if(dta_weekly$resultqualcode[j] == "<="){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]] == ">"){
+                            if(xi <= temdta[[j]][[1]][[k]]){a<- 1} else {a<-0}
+                        }else if(temdta[[j]][[2]][[k]] %in% c("=", ">=")){
+                            if(xi < temdta[[j]][[1]][[k]]){a<- 1} else {a<-0}
+                        }else{a <-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else if(dta_weekly$resultqualcode[j] == ">="){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]] == "<"){
+                            if(xi >= temdta[[j]][[1]][[k]]){a<- -1} else {a<-0}
+                        }else if(temdta[[j]][[2]][[k]] %in% c("=", "<=")){
+                            if(xi > temdta[[j]][[1]][[k]]){a<- -1} else {a<-0}
+                        }else{a <-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else{
+                    b <-0 
+                    for (k in 1:c){
+                        if(temdta[[j]][[2]][[k]] %in% c("=", "<", "<=")){
+                            if(xi >= temdta[[j]][[1]][[k]]){a<- -1}else{a<-0} 
+                        }else{a<-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }
+            }else{
+                dta_weekly$mks[j]<-0
+            }}
+        dta_weekly$yrmon <- as.yearmon(dta_weekly$sampledate)
+        dta_weekly <- arrange(dta_weekly)[order(dta_weekly$sampledate),]
+    return(dta_weekly)
+    })
+    
+tiedta <- reactive({
+    first12week <- list()
+w <-0
+for (i in unique(dta_week()$month)){
+w <-w+1
+first12week[[w]] <- dta_week()[dta_week()$month == i,]$sampleyrwk[1]
+}
+    
+numofmon <- sum(!(is.na(first12week)))
+    
+temdta3 <- list()
+g<-0
+for (j in as.numeric(row.names(dta_week()[dta_week()$sampleyrwk %in% unlist(first12week),]))) {
+        temdta1 <- as.data.frame(list('wkresult' =dta_week()[(dta_week()$sampledate >= dta_week()$sampledate[j])&
+                                                                 (dta_week()$month == dta_week()$month[j]),]$wkresult,
+                                      'resultqualcode'=dta_week()[(dta_week()$sampledate >= dta_week()$sampledate[j])&
+                                                                      (dta_week()$month == dta_week()$month[j]),]$resultqualcode,
+                                      'sampledate'=dta_week()[(dta_week()$sampledate >= dta_week()$sampledate[j])&
+                                                                  (dta_week()$month == dta_week()$month[j]),]$sampledate))
+        temdta2 <- as.data.frame(temdta1 %>%
+                                     group_by(wkresult) %>%
+                                     count(resultqualcode))
+        temdta2$tie <- 0
+        if(!temdta2$resultqualcode[1] =="<"){
+            for(k in 1:nrow(temdta2)){
+                temdta2$tie[k] <- 
+                    if(temdta2$resultqualcode[k] == "="){
+                        sum(temdta2[temdta2$wkresult>=temdta2$wkresult[k] & temdta2$resultqualcode == "<=",]$n)+
+                            sum(temdta2[temdta2$wkresult>temdta2$wkresult[k] & temdta2$resultqualcode == "<",]$n)+
+                            sum(temdta2[temdta2$wkresult==temdta2$wkresult[k] & temdta2$resultqualcode == "=",]$n)+
+                            sum(temdta2[temdta2$wkresult<=temdta2$wkresult[k] & temdta2$resultqualcode == ">=",]$n)+
+                            sum(temdta2[temdta2$wkresult<temdta2$wkresult[k] & temdta2$resultqualcode == ">",]$n)
+                    }else{1}
+            }
+        }else{
+            temdta2$tie[1]<-
+                sum(temdta2[temdta2$wkresult>=temdta2$wkresult[1] & temdta2$resultqualcode %in% c("<=","<"),]$n)
+            if(nrow(temdta2)>1){
+                for (k in 2:nrow(temdta2)) {
+                    temdta2$tie[k]<-
+                        if(temdta2$resultqualcode[k] == "="){
+                            sum(temdta2[temdta2$wkresult>=temdta2$wkresult[k] & temdta2$resultqualcode == "<=",]$n)+
+                                sum(temdta2[temdta2$wkresult>temdta2$wkresult[k] & temdta2$resultqualcode == "<",]$n)+
+                                sum(temdta2[temdta2$wkresult==temdta2$wkresult[k] & temdta2$resultqualcode == "=",]$n)+
+                                sum(temdta2[temdta2$wkresult<=temdta2$wkresult[k] & temdta2$resultqualcode == ">=",]$n)+
+                                sum(temdta2[temdta2$wkresult<temdta2$wkresult[k] & temdta2$resultqualcode == ">",]$n)
+                        }else{1} 
+                }
+            }
+        }
+        g<-g+1
+        temdta3[[g]]<- temdta2$tie
+    }
+    
+    X <- list()
+    y<-0
+    for (w in first12week) {
+        y<-y+1
+        month1 <- dta_week()[dta_week()$sampleyrwk==w,]$month
+        X[[y]] <- dta_week()[dta_week()$month==month1,]$mks
+    }
+    i <- 0
+    Y <- list()
+    numofX <- length(X)
+    for (x in 1:numofX) {
+        if(!is.null(X[[x]])){
+            i<- i+1
+            Y[[i]] <- X[[x]]
+        }
+    }
+    
+    Var <- list()
+    for (x in 1:numofmon) {
+        n<- length(Y[[x]])
+        Var[[x]] <- n*(n-1)*(2*n+5)/18-sum(unlist(lapply(temdta3[[x]], function(n){n*(n-1)*(2*n+5)/18})))
+    }
+    
+    Z<- if (sum(unlist(Var))== 0){
+        NaN
+    }else{
+        if(sum(unlist(Y)) >0){
+            (sum(unlist(Y))-1)/sqrt(sum(unlist(Var)))
+        }else if (sum(unlist(Y)) ==0){
+            0
+        }else{
+            (sum(unlist(Y))+1)/sqrt(sum(unlist(Var)))
+        }}
+    Z
+})
+evaluation <- reactive({
+    evaltext<-if(!is.na(tiedta())){
+        if(tiedta() <= 0){
+            if(tiedta() < -1.645){
+                    cat(paste("Z-stat:",round(tiedta(),digits=3),  
+                    "<br/>p-value < 0.05",  
+                    "<br/>Decreasing trend, 
+                          giving a 5% significance level."))
+            }else if(tiedta() < -1.28){
+                    cat(paste("Z-stat:",round(tiedta(),digits=3),
+                    "<br/>p-value < 0.1",
+                    "<br/>Decreasing trend, giving a 10% significance level."))
+            }else{
+                    cat("p-value > 0.1. The sample doesn't provide enough evidence to
+                        support that there is a monotonic trend.")
+                }
+         }else{
+            if(tiedta() > 1.645){
+                    cat(paste("Z-stat:",round(tiedta(),digits=3),
+                    "<br/>p-value < 0.05",
+                    "<br/>Increasing Trend, 
+                          giving a 5% significance level."))
+            }else if(tiedta() > 1.28){
+                    cat(paste("Z-stat:",round(tiedta(),digits=3),
+                    "<br/>p-value < 0.1",
+                    "<br/>Increasing Trend, 
+                          giving a 10% significance level."))
+            }else{
+                    cat("p-value > 0.1. The sample doesn't provide enough evidence to
+                        support that there is a monotonic trend.")
+            }
+        }
+    }else{
+            cat(" Mann-Kendall test can't work.")
+    }
+    })
+    output$Z <- renderPrint({evaluation()})
+    distributionplot <- reactive({
+      ggplot(data = dta_week())+
+            geom_point(mapping = aes(x = sampledate, y= wkresult,
+                                     color = resultqualcode),alpha = 0.6)+
+            scale_color_manual(name = "",
+                               values = c(">"="firebrick",">=" = "firebrick1",
+                             "="="gold", "<=" ="dodgerblue",
+                             "<"= "dodgerblue4"))+
+            theme_minimal()+
+            theme(axis.line.x.bottom = element_blank())+
+            labs(title = 'Weekly Values Across The Sample Test Period',
+                 x = '',
+                 y = 'Observed Values in Log Form')})
+    output$distribution <- renderPlotly({
+        ggplotly(distributionplot()) %>%
+      layout(legend = list(x= 1, y = 1,
+                           title = list(text = "The Sign of Censored Data")))
+    })
+},      
+options = list(height = 700)  
+)
+```
+
+### Example and Analysis Process {.tabset}
+#### Data Manipulation
+* Subset data according to the example stationcode and analyte.
+```{r echo = TRUE}
+dta_test <- dta1[dta1$stationcode == "BDP08" & dta1$analyte == "Coliform, Fecal",
+               c("sampledate","sampleyear","sampleyrwk","result","resultqualcode")]
+```
+
+* People usually sample more times during rain seasons. To avoid the larger weight of rainy days in the trend analysis, here we make the time series more regular, which has one sample every week, by using median values.
+```{r results='hide'}
+dta_test$wkresult <- 0
+for (w in dta_test$sampleyrwk){
+    dta_test[dta_test$sampleyrwk == w,]$wkresult <- 
+        if (sum(dta_test$sampleyrwk == w)>1){
+        median(dta_test[dta_test$sampleyrwk == w,]$result)
+    }else{
+        dta_test[dta_test$sampleyrwk == w,]$result
+    }
+}
+
+## make a new dataset only including the weekly values.
+dta_weekly <- as.data.frame(list("wkresult"=0,"resultqualcode"=0,"sampledate"=0,
+                              "sampleyrwk"=matrix(unique(dta_test$sampleyrwk))))
+for (w in dta_test$sampleyrwk){
+    dta_weekly[dta_weekly$sampleyrwk==w,]$sampledate <- as.character(dta_test[dta_test$sampleyrwk==w,]$sampledate[1])
+    dta_weekly[dta_weekly$sampleyrwk==w,]$wkresult <- dta_test[dta_test$sampleyrwk==w,]$wkresult[1]
+    dta_weekly[dta_weekly$sampleyrwk==w,]$resultqualcode <- as.character(dta_test[dta_test$sampleyrwk==w,]$resultqualcode[1])
+}
+dta_weekly$sampledate <- as.Date(dta_weekly$sampledate)
+dta_weekly$week <- as.numeric(strftime(dta_weekly$sampledate, format = "%V"))
+dta_weekly$month <- as.numeric(strftime(dta_weekly$sampledate, format = "%m"))
+```
+
+#### Sample Data
+* The variables below are required to conduct the trend analysis:  
+    "sampledate"  
+    "sampleyrwk"    
+    "result"    
+    "resultqualcode" 
+    
+    
+* The table below shows the first 100 entries of the cleaned and sampled dataset.
+```{r echo = FALSE}
+head(dta_weekly,100) %>%
+    datatable(options = list(scrollX = TRUE, 
+                             columnDefs = list(list(className = 'dt-center'))))
+```
+
+#### Data Summary 
+```{r}
+paste('Number of observations:', nrow(dta_weekly))
+```
+<br>
+Among all the variables, **'wkresult'** is the most important one we use to conduct the analysis. Here is a brief summary of **'wkresult'** and the start and end date in the sample dataset.
+```{r}
+summary(dta_weekly$wkresult)
+paste("Test Period: from",min(dta_weekly$sampledate),"to",max(dta_weekly$sampledate))
+```
+
+```{r message = FALSE, warning = FALSE}
+ggplot(data = dta_weekly)+
+    geom_point(mapping = aes(x = sampledate, y = wkresult),
+               color = 'orange', alpha = 0.6)+
+    theme_minimal()+
+    theme(panel.grid.minor.x = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          panel.grid.major.x = element_line(linetype = "dashed"),
+          panel.grid.major.y = element_line(linetype = "dashed"))+
+    labs(title = 'Observation Across the Test Period',
+         x = 'Sample Date',
+         y = 'Observed Value in Log Form')
+```
+
+```{r message = FALSE, warning = FALSE}
+ggplot(data = dta_weekly)+
+    geom_histogram(mapping = aes(x = wkresult), alpha= 0.7,
+                   color = 'orange', fill = 'orange')+
+    theme_minimal()+
+    theme(panel.grid.minor.x = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          panel.grid.major.x = element_line(linetype = "dashed"),
+          panel.grid.major.y = element_line(linetype = "dashed"))+
+    labs(x = "Weekly Value",
+         title = "The Distribution of Observed Values in Log Form",
+         y = "")
+```
+
+
+#### Evaluation
+1. Prepare S' statistics  
+<br>
+*To deal with the limit of detection (LD), including both '<'(less than) and '>'(greater than) in the **resultqualcode**, Mann-Kendall test requires to "consider all data reported below the highest LD to be tied at the highest LD. The functions below are dealing with the situations '< and/or '>' occur.*
+
+*Tip: Normally, there should not be any "<=" or ">=" sign in the dataset, and they should be regarded as "<" or ">". However, to avoid editing the dataset too much, here we add the values and meaning of "<=" and ">=" into the calculation process.*
+```{r results='hold'}
+dta_weekly <- as.data.frame(list("wkresult"=0,"resultqualcode"=0,"sampledate"=0,
+                                      "sampleyrwk"=matrix(unique(dta_test$sampleyrwk))))
+        for (w in dta_test$sampleyrwk){
+            dta_weekly[dta_weekly$sampleyrwk==w,]$sampledate <- as.character(dta_test[dta_test$sampleyrwk==w,]$sampledate[1])
+            dta_weekly[dta_weekly$sampleyrwk==w,]$wkresult <- dta_test[dta_test$sampleyrwk==w,]$wkresult[1]
+            dta_weekly[dta_weekly$sampleyrwk==w,]$resultqualcode <- as.character(dta_test[dta_test$sampleyrwk==w,]$resultqualcode[1])
+        }
+        dta_weekly$sampledate <- as.Date(dta_weekly$sampledate)
+        dta_weekly$week <- as.numeric(strftime(dta_weekly$sampledate, format = "%V"))
+        dta_weekly$month <- as.numeric(strftime(dta_weekly$sampledate, format = "%m"))
+        #evaluation
+        dta_weekly<-arrange(dta_weekly)[order(dta_weekly$sampledate),]
+        dta_weekly$mks <- 0
+        temdta <- list()
+        for (j in as.numeric(row.names(dta_weekly))) {
+            temdta[[j]] <- list('wkresult' =dta_weekly[(dta_weekly$sampledate > dta_weekly$sampledate[j])&
+                                                        (dta_weekly$month == dta_weekly$month[j]),]$wkresult,
+                                'resultqualcode'=dta_weekly[(dta_weekly$sampledate > dta_weekly$sampledate[j])&
+                                                             (dta_weekly$month == dta_weekly$month[j]),]$resultqualcode)
+            xi <- dta_weekly$wkresult[j]
+            c <- length(temdta[[j]][[1]])
+            if (c != 0){
+                if (dta_weekly$resultqualcode[j] == "="){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]]== "<"){
+                            if(xi >= temdta[[j]][[1]][[k]]){
+                                a<--1} else {
+                                    a<-0}
+                        }else if(temdta[[j]][[2]][[k]]== "<="){
+                                if(xi > temdta[[j]][[1]][[k]]){
+                                    a<--1} else {
+                                        a<-0}
+                        }else if(temdta[[j]][[2]][[k]]== ">"){
+                            if(xi <= temdta[[j]][[1]][[k]]){
+                                a<-1} else {
+                                    a<-0}
+                        }else if(temdta[[j]][[2]][[k]]== ">="){
+                            if(xi < temdta[[j]][[1]][[k]]){
+                                a<-1} else {
+                                    a<-0}
+                        }else{
+                            if(xi > temdta[[j]][[1]][[k]]){
+                                a<--1} else if (xi == temdta[[j]][[1]][[k]]){
+                                    a<-0}else{
+                                        a <-1}
+                        }
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else if(dta_weekly$resultqualcode[j] == "<"){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]] %in% c("=", ">", ">=")){
+                            if(xi <= temdta[[j]][[1]][[k]]){a<-1} else {a<-0}
+                        }else {a <-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else if(dta_weekly$resultqualcode[j] == "<="){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]] == ">"){
+                            if(xi <= temdta[[j]][[1]][[k]]){a<- 1} else {a<-0}
+                        }else if(temdta[[j]][[2]][[k]] %in% c("=", ">=")){
+                            if(xi < temdta[[j]][[1]][[k]]){a<- 1} else {a<-0}
+                        }else{a <-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else if(dta_weekly$resultqualcode[j] == ">="){
+                    b<-0
+                    for (k in 1:c){
+                        if (temdta[[j]][[2]][[k]] == "<"){
+                            if(xi >= temdta[[j]][[1]][[k]]){a<- -1} else {a<-0}
+                        }else if(temdta[[j]][[2]][[k]] %in% c("=", "<=")){
+                            if(xi > temdta[[j]][[1]][[k]]){a<- -1} else {a<-0}
+                        }else{a <-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }else{
+                    b <-0 
+                    for (k in 1:c){
+                        if(temdta[[j]][[2]][[k]] %in% c("=", "<", "<=")){
+                            if(xi >= temdta[[j]][[1]][[k]]){a<- -1}else{a<-0} 
+                        }else{a<-0}
+                        b <-a+b}
+                    dta_weekly$mks[j]<-b
+                }
+            }else{
+                dta_weekly$mks[j]<-0
+            }}
+
+```
+
+2. Calculate Ties
+```{r echo = TRUE}
+dta_weekly<-arrange(dta_weekly)[order(dta_weekly$sampledate),]
+dta_weekly$yrmon <- as.yearmon(dta_weekly$sampledate)
+first12week <- list()
+w <-0
+for (i in unique(dta_weekly$month)){
+        w <-w+1
+        first12week[[w]] <- dta_weekly[dta_weekly$month == i,]$sampleyrwk[1]
+}
+    
+numofmon <- sum(!(is.na(first12week)))
+    
+temdta3 <- list()
+g<-0
+for (j in as.numeric(row.names(dta_weekly[dta_weekly$sampleyrwk %in% unlist(first12week),]))) {
+    temdta1 <- as.data.frame(list('wkresult' =dta_weekly[(dta_weekly$sampledate >= dta_weekly$sampledate[j]) & (dta_weekly$month == dta_weekly$month[j]),]$wkresult,
+                                  'resultqualcode'=dta_weekly[(dta_weekly$sampledate >= dta_weekly$sampledate[j]) & (dta_weekly$month == dta_weekly$month[j]),]$resultqualcode,
+                                   'sampledate'=dta_weekly[(dta_weekly$sampledate >= dta_weekly$sampledate[j]) & (dta_weekly$month == dta_weekly$month[j]),]$sampledate))
+   temdta2 <- as.data.frame(temdta1 %>%
+        group_by(wkresult) %>%
+        count(resultqualcode))
+temdta2$tie <- 0
+   if(!temdta2$resultqualcode[1] =="<"){
+        for(k in 1:nrow(temdta2)){
+            temdta2$tie[k] <- 
+            if(temdta2$resultqualcode[k] == "="){
+                sum(temdta2[temdta2$wkresult>=temdta2$wkresult[k] & temdta2$resultqualcode == "<=",]$n)+
+                    sum(temdta2[temdta2$wkresult>temdta2$wkresult[k] & temdta2$resultqualcode == "<",]$n)+
+                    sum(temdta2[temdta2$wkresult==temdta2$wkresult[k] & temdta2$resultqualcode == "=",]$n)+
+                    sum(temdta2[temdta2$wkresult<=temdta2$wkresult[k] & temdta2$resultqualcode == ">=",]$n)+
+                    sum(temdta2[temdta2$wkresult<temdta2$wkresult[k] & temdta2$resultqualcode == ">",]$n)
+            }else{1}
+    }
+}else{
+    temdta2$tie[1]<-
+        sum(temdta2[temdta2$wkresult>=temdta2$wkresult[1] & temdta2$resultqualcode %in% c("<=","<"),]$n)
+    if(nrow(temdta2)>1){
+        for (k in 2:nrow(temdta2)) {
+            temdta2$tie[k]<-
+                if(temdta2$resultqualcode[k] == "="){
+                    sum(temdta2[temdta2$wkresult>=temdta2$wkresult[k] & temdta2$resultqualcode == "<=",]$n)+
+                        sum(temdta2[temdta2$wkresult>temdta2$wkresult[k] & temdta2$resultqualcode == "<",]$n)+
+                        sum(temdta2[temdta2$wkresult==temdta2$wkresult[k] & temdta2$resultqualcode == "=",]$n)+
+                        sum(temdta2[temdta2$wkresult<=temdta2$wkresult[k] & temdta2$resultqualcode == ">=",]$n)+
+                        sum(temdta2[temdta2$wkresult<temdta2$wkresult[k] & temdta2$resultqualcode == ">",]$n)
+                }else{1} 
+          }
+      }
+  }
+  g<-g+1
+  temdta3[[g]]<- temdta2$tie
+}
+    
+X <- list()
+    y<-0
+    for (w in first12week) {
+        y<-y+1
+        month1 <- dta_weekly[dta_weekly$sampleyrwk==w,]$month
+        X[[y]] <- dta_weekly[dta_weekly$month==month1,]$mks
+    }
+    i <- 0
+    Y <- list()
+    numofX <- length(X)
+    for (x in 1:numofX) {
+        if(!is.null(X[[x]])){
+            i<- i+1
+            Y[[i]] <- X[[x]]
+        }
+    }
+```
+
+3. Calculate Z Statistics  
+```{r}
+Var <- list()
+for (x in 1:numofmon) {
+        n<- length(Y[[x]])
+        Var[[x]] <- n*(n-1)*(2*n+5)/18-sum(unlist(lapply(temdta3[[x]], function(n){n*(n-1)*(2*n+5)/18})))
+}
+    
+Z<- if (sum(unlist(Var))== 0){
+        NaN
+    }else{
+        if(sum(unlist(Y)) >0){
+            (sum(unlist(Y))-1)/sqrt(sum(unlist(Var)))
+        }else if (sum(unlist(Y)) ==0){
+            0
+        }else{
+            (sum(unlist(Y))+1)/sqrt(sum(unlist(Var)))
+        }}
+    print(paste("Z-score:",Z))
+```
+
+4. Final Evaluation
+```{r}
+evaltext<- 
+    if(!is.na(Z)){
+            if(Z <= 0){
+                if(Z < -1.645){
+                    cat(paste("Z-stat:",round(Z,digits=3),  
+                    "p-value < 0.05",  
+                    "Decreasing trend, 
+                          giving a 5% significance level"))
+                }else if(Z < -1.28){
+                    cat(paste("Z-stat:",round(Z,digits=3),
+                    "p-value < 0.1",
+                    "Decreasing trend, giving a 10% significance level"))
+                }else{
+                    cat("The sample doesn't provide enough evidence to 
+                        support that there is a monotonic trend.")
+                }
+            }else{
+                if(Z > 1.645){
+                    cat(paste("Z-stat:",round(Z,digits=3),
+                    "p-value < 0.05",
+                    "Increasing Trend, 
+                          giving a 5% significance level"))
+                }else if(Z > 1.28){
+                    cat(paste("Z-stat:",round(Z,digits=3),
+                    "p-value < 0.1",
+                    "Increasing Trend, 
+                          giving a 10% significance level"))
+                }else{
+                    cat("The sample doesn't provide enough evidence to 
+                        support that there is a monotonic trend.")
+                }
+            }
+        }else{
+            cat("Mann-Kendall test can't work.")
+        }
+```
+## Summary {.tabset}
+
+### General Picture
+
+
+```{r include=FALSE}
+FecalColiform <- read_excel("FecalColiform.xlsx")
+Entero <- read_excel("Entero.xlsx")
+Fecaltotal <- read_excel("Fecaltotal.xlsx")
+Ecoli <- read_excel("Ecoli.xlsx")
+
+FecalColiform$z_score <- replace_na(FecalColiform$z_score, "NaN")
+Entero$z_score <- replace_na(Entero$z_score, "NaN")
+Fecaltotal$z_score <- replace_na(Fecaltotal$z_score, "NaN")
+Ecoli$z_score <- replace_na(Ecoli$z_score, "NaN")
+FecalColiform <- FecalColiform[,-(3:4)]
+Entero <- Entero[,-(3:4)]
+Fecaltotal <- Fecaltotal[,-(3:4)]
+Ecoli <- Ecoli[,-(3:4)]
+```
+Here's the general picture for all four baterial characteristics. For all the stations where Mann-Kendall test can work, very small proportion of stations have enough evidence to support that there's an increasing trend of water quality, which suggests a **good** impact of all the measures and actions protecting water quality in the past twenty years. Specifically, compared to other three characteristics, prior protection has the most significant impact on enterococcus.  
+<br>
+E. coli doesn't have a full pie in the graph, because only 40 out of 136 the stations in South Orange County provide records for this characteristics.  
+<br>
+In the next tab, we will discuss more about the situation "Mann-Kendall test cannot work" and the bias generated in this analysis.  
+<br>
+```{r}
+FecalColiform$analyte <- "Coliform, Fecal"
+Fecaltotal$analyte <- "Coliform, Total"
+Entero$analyte <- "Enterococcus"
+Ecoli$analyte <- "E. coli"
+generalpicture <- rbind(FecalColiform,Entero,Fecaltotal,Ecoli)
+generaltable <- as.data.frame(generalpicture %>%
+                                group_by(analyte) %>%
+                                count(trend))
+ggplot(data = generaltable, mapping = aes(x = 0,y = n, fill = trend))+
+            geom_bar(stat="identity")+
+            scale_fill_manual(name = "Result Type",
+                              values = c("Decreasing trend" = "dodgerblue4",
+                                         "Increasing trend" = "firebrick",
+                                         "Mann-Kendall test cannot work" = "darkgrey",
+                                         "Not enough evidence" = "gold"))+
+            coord_polar("y", start=0)+
+            theme_void()+
+            facet_wrap(~analyte)+
+            labs(title = "Water Quality Trend In South Orange County By Different Bacterial Characteristics")
+```
+<br>
+The table below provides the detailed information for each station by different baterial characteristics.  
+<br>
+```{r echo = FALSE}
+shinyApp(ui2 <- fluidPage(selectInput(inputId = "analyte2",
+                                      label = "Bacterial Characteristics",
+                                      choices = unique(dta1$analyte),
+                                      selected = 'Coliform, Fecal'),
+                          actionButton(inputId = 'click2', label = 'Get the result'),
+                          br(),
+                          br(),
+                          DT::dataTableOutput(outputId = "Zscoretable")
+),
+server2 <- function(input, output){
+    tableselect <- eventReactive(input$click2,{
+        dta_table <- if(input$analyte2 == "Coliform, Fecal"){
+            FecalColiform
+        }else if(input$analyte2 == "Coliform, Total"){
+            Fecaltotal
+        }else if(input$analyte2 == "Enterococcus"){
+            Entero
+        }else{Ecoli}
+    })
+    output$Zscoretable <- DT::renderDataTable({tableselect()})
+}
+)
+```
+
+### Potential Improvement
+
+* Limits of Mann-Kendall test  
+<br>
+Keeping only the staions where Mann-Kendall test cannot work by each bacterial characteristic, the scatter plots below show the distribution of observed values for each stations.
+```{r message=FALSE,warning=FALSE}
+shinyApp(ui3 <- fluidPage(selectInput(inputId = "analyte3",
+                                      label = "Bacterial Characteristics",
+                                      choices = unique(dta1$analyte),
+                                      selected = 'Coliform, Fecal'),
+                          actionButton(inputId = 'click3', label = 'Go'),
+                          br(),
+                          br(),
+                          plotlyOutput(outputId = "dontworkplot", height = "600px")
+),
+server3 <- function(input, output){
+  dontwork <- eventReactive(input$click3,{
+    dontworkstation <- dta1[dta1$stationcode %in% generalpicture[generalpicture$trend == "Mann-Kendall test cannot work"& generalpicture$analyte == input$analyte3,]$stationcode & dta1$analyte == input$analyte3,]
+    dontworkstationplot <- ggplot(data = dontworkstation,
+                                  mapping = aes(x=sampledate,y=result,color = resultqualcode))+
+      geom_point(alpha = 0.7, size = 0.7)+
+      facet_wrap(~stationcode)+
+      scale_color_manual(name = "",
+        values = c(">"="firebrick",">=" = "firebrick1",
+                             "="="gold", "<=" ="dodgerblue",
+                             "<"= "dodgerblue4"))+
+      labs(x = "",
+           y = "Observed Value in Log Form")+
+      theme(legend.position = 'top') 
+    dontworkstationplot
+    })
+  output$dontworkplot <- renderPlotly({
+      ggplotly(dontwork()) %>%
+      layout(legend = list(x= 1, y = 1,
+                           title = list(text = "The Sign of Censored Data")))
+    })
+},      
+options = list(height = 700)
+)
+```
+Two main reasons will make this monthly Mann-Kendall unapplicable. The **first** one is insufficient sample size for monthly Mann-Kendall test: no monthly comparison. The **second** one is the huge number of ties in the sample data set. It is common when we have too many large values with "smaller than"(<) sign (or small values with "greater than"(>) sign), **while** at the same time, we also have a lot of ranks (different exact values (=)).  
+<br>
+<br>
+
+* Other Problems  
+<br>
+One of the bias generated during the sampling process, when the median values were selected to represent weekly value for each week. Similarly, for convenience, the sign of the weekly value used the first one of the week. There could be a potential improvement in this sampling process, or a replacement by some other analysis method.  
+<br>
+The other bias is in the Mann-Kendall test. According to the algorithm, a reasonably large number of ties is more likely to get a significant result (p <0.1).
